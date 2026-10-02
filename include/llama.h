@@ -1471,6 +1471,8 @@ extern "C" {
 
     LLAMA_API struct llama_sampler * llama_sampler_init_green_red(float logit_bias, float gamma, const char * seed, void * token_history);
 
+    LLAMA_API struct llama_sampler * llama_sampler_init_synthId(const int64_t * keys, size_t n_keys, const char * seed, uint32_t rng_seed, void * token_history );
+
     LLAMA_API bool llama_sampler_check_basic_watermark(llama_token token);
 
     LLAMA_API bool llama_sampler_check_basic_watermarkv2(llama_token token, float gamma, const char * seed, const llama_token * token_history, size_t n_tokens, int32_t n_vocab);

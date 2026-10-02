@@ -5,6 +5,7 @@
 #include <iostream>
 #include <string>
 #include <vector>
+#include <chrono>
 
 // fill the batch with tokens at consecutive positions starting from pos_0, output logits only for the last one
 static void batch_set_tokens(llama_batch_ext * batch, const llama_token * tokens, int32_t n_tokens, llama_pos pos_0) {
@@ -70,11 +71,11 @@ int main(int argc, char ** argv) {
     }
 
     // only print errors
-    llama_log_set([](enum ggml_log_level level, const char * text, void * /* user_data */) {
-        if (level >= GGML_LOG_LEVEL_ERROR) {
-            fprintf(stderr, "%s", text);
-        }
-    }, nullptr);
+    // llama_log_set([](enum ggml_log_level level, const char * text, void * /* user_data */) {
+    //     if (level >= GGML_LOG_LEVEL_ERROR) {
+    //         fprintf(stderr, "%s", text);
+    //     }
+    // }, nullptr);
 
     llama_backend_init();
 
@@ -120,6 +121,9 @@ int main(int argc, char ** argv) {
         std::string response;
         int32_t N = 4;
 
+        auto startTime = std::chrono::steady_clock::now();
+        int generated_tokens = 0;
+
         const bool is_first = llama_memory_seq_pos_max(llama_get_memory(ctx), 0) == -1;
 
         // tokenize the prompt
@@ -158,6 +162,7 @@ int main(int argc, char ** argv) {
 
             // sample the next token
             new_token_id = llama_sampler_sample(smpl, ctx, -1);
+            generated_tokens++;
 
             TokenHistory.push_back(new_token_id);
 
@@ -188,6 +193,21 @@ int main(int argc, char ** argv) {
             tokens   = &new_token_id;
             n_tokens = 1;
         }
+
+        auto end = std::chrono::steady_clock::now();
+
+        double seconds =
+            std::chrono::duration<double>(end - startTime).count();
+
+        double tokens_per_second =
+            generated_tokens / seconds;
+
+        printf(
+            "\nGenerated %d tokens in %.2f seconds (%.2f tokens/s)\n",
+            generated_tokens,
+            seconds,
+            tokens_per_second
+        );
 
         return response;
     };
@@ -240,6 +260,7 @@ int main(int argc, char ** argv) {
     for (auto & msg : messages) {
         free(const_cast<char *>(msg.content));
     }
+    llama_perf_context_print(ctx);
     llama_batch_ext_free(batch);
     llama_sampler_free(smpl);
     llama_free(ctx);
