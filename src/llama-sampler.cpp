@@ -1532,6 +1532,385 @@ struct llama_sampler * llama_sampler_init_top_k(int32_t k) {
     );
 }
 
+
+// green-red
+
+static void llama_sampler_green_red_impl(llama_token_data_array * cur_p, int32_t logit_bias) {
+    
+    int write = 0;
+    if (logit_bias >= 0) {
+        write = -1;
+    }
+
+    // printf("logit_bias: %d, write: %d\n", logit_bias, write);
+
+    if (write == 0){
+        for (int i = 0; i < (int) cur_p->size; ++i) {
+            if (cur_p->data[i].id % 2 == 0) {
+                cur_p->data[write++] = cur_p->data[i];
+            }
+        }
+        cur_p->size = write;
+    }else{
+        for (int i = 0; i < (int) cur_p->size; ++i) {
+            if (cur_p->data[i].id % 2 == 0) {
+                cur_p->data[i].logit += logit_bias;
+            }
+        }
+    }
+
+    cur_p->sorted = false;
+}
+
+static uint64_t hash_string(const std::string & input) {
+    uint64_t hash = 14695981039346656037ULL;
+
+    for (unsigned char c : input) {
+        hash ^= c;
+        hash *= 1099511628211ULL;
+    }
+
+    return hash;
+}
+
+static void llama_sampler_green_red_implv2(llama_token_data_array * cur_p, float logit_bias, float gamma, const std::string & seed, const std::vector<llama_token> & token_history) {
+
+    size_t n_tokens = token_history.size();
+    std::string hash_input = seed;
+
+    // printf("Tokens used for hash: ");
+
+    for (size_t i = 0; i < n_tokens; ++i) {
+        // printf("%d ", token_history[i]);
+        hash_input += std::to_string(token_history[i]);
+    }
+
+    uint64_t h = hash_string(hash_input);
+
+    std::mt19937_64 rng(h);
+
+    size_t n = cur_p->size;
+    std::vector<size_t> indices(n);
+    for (size_t i = 0; i < n; ++i) {
+        indices[i] = i;
+    }
+    std::shuffle(indices.begin(), indices.end(), rng);
+
+    // 3. First gamma fraction of the shuffled indices = "green"
+    size_t n_green = (size_t) (gamma * (float) n);
+
+    std::vector<bool> is_green(n, false);
+    for (size_t i = 0; i < n_green; ++i) {
+        is_green[indices[i]] = true;
+    }
+    
+    int write = 0;
+    if (logit_bias >= 0) {
+        write = -1;
+    }
+
+    if (write == 0){
+        for (int i = 0; i < (int) cur_p->size; ++i) {
+            if (is_green[i]) {
+                cur_p->data[write++] = cur_p->data[i];
+            }
+        }
+        cur_p->size = write;
+    }else{
+        for (int i = 0; i < (int) cur_p->size; ++i) {
+            // printf("TokenId Scan: %s",cur_p->data[i].id);
+            if (is_green[i]) {
+                cur_p->data[i].logit += logit_bias;
+            }
+        }
+    }
+
+}
+
+bool llama_sampler_check_basic_watermark(llama_token token) {
+    return token % 2 == 0;
+}
+
+// bool llama_sampler_check_basic_watermarkv2(llama_token token, float gamma, const std::string & seed, const std::vector<llama_token> & token_history, const int n_vocab) {
+bool llama_sampler_check_basic_watermarkv2(llama_token token, float gamma, const char * seed, const llama_token * token_history, size_t n_tokens, int32_t n_vocab) {
+
+    // size_t n_tokens = token_history.size();
+    std::string hash_input = seed;
+
+    // printf("Tokens used for hash: ");
+
+    for (size_t i = 0; i < n_tokens; ++i) {
+        // printf("%d ", token_history[i]);
+        hash_input += std::to_string(token_history[i]);
+    }
+
+    uint64_t h = hash_string(hash_input);
+
+    std::mt19937_64 rng(h);
+
+    size_t n = n_vocab;
+    std::vector<size_t> indices(n);
+    for (size_t i = 0; i < n; ++i) {
+        indices[i] = i;
+    }
+    std::shuffle(indices.begin(), indices.end(), rng);
+
+    // 3. First gamma fraction of the shuffled indices = "green"
+    size_t n_green = (size_t) (gamma * n);
+
+    std::vector<bool> is_green(n, false);
+    for (size_t i = 0; i < n_green; ++i ) {
+        is_green[indices[i]] = true;
+    }
+
+    return is_green[token];
+}
+
+void * llama_token_history_create() {
+    return new std::vector<llama_token>();
+}
+
+void llama_token_history_add(void * history, llama_token token) {
+    auto * h = static_cast<std::vector<llama_token> *>(history);
+    h->push_back(token);
+}
+
+void llama_token_history_remove_oldest(void * history) {
+    auto * h = static_cast<std::vector<llama_token> *>(history);
+
+    if (!h->empty()) {
+        h->erase(h->begin());
+    }
+}
+
+struct llama_sampler_green_red : public llama_sampler_backend {
+    const float logit_bias;
+    const float gamma;
+    const std::string seed;
+    std::vector<llama_token> * token_history;
+};
+
+static const char * llama_sampler_green_red_name(const struct llama_sampler * smpl) {
+    auto * sctx = (llama_sampler_green_red *) smpl->ctx;
+    return sctx->get_name();
+}
+
+static void llama_sampler_green_red_apply(struct llama_sampler * smpl, llama_token_data_array * cur_p) {
+    auto * ctx = (llama_sampler_green_red *) smpl->ctx;
+    // llama_sampler_green_red_impl(cur_p, ctx->logit_bias);
+    llama_sampler_green_red_implv2(cur_p, ctx->logit_bias, ctx->gamma, ctx->seed, *ctx->token_history);
+}
+
+static struct llama_sampler * llama_sampler_green_red_clone(const struct llama_sampler * smpl) {
+    const auto * ctx = (const llama_sampler_green_red *) smpl->ctx;
+    return llama_sampler_init_green_red(ctx->logit_bias, ctx->gamma, ctx->seed.c_str(), ctx->token_history);
+}
+
+static void llama_sampler_green_red_free(struct llama_sampler * smpl) {
+    delete (llama_sampler_green_red *) smpl->ctx;
+}
+
+static struct llama_sampler_i llama_sampler_green_red_i = {
+    /* .name              = */ llama_sampler_green_red_name,
+    /* .accept            = */ nullptr,
+    /* .apply             = */ llama_sampler_green_red_apply,
+    /* .reset             = */ nullptr,
+    /* .clone             = */ llama_sampler_green_red_clone,
+    /* .free              = */ llama_sampler_green_red_free,
+    /* .backend_init      = */ nullptr,
+    /* .backend_accept    = */ nullptr,
+    /* .backend_apply     = */ nullptr,
+    /* .backend_set_input = */ nullptr,
+    /* .backend_reset     = */ nullptr,
+    /* .copy_state        = */ nullptr,
+};
+
+struct llama_sampler * llama_sampler_init_green_red(float logit_bias, float gamma, const char * seed, void * token_history ) {
+
+    return llama_sampler_init(
+        /* .iface = */ &llama_sampler_green_red_i,
+        /* .ctx   = */ new llama_sampler_green_red {
+            ("green-red"),
+            logit_bias,
+            gamma,
+            std::string(seed),
+            static_cast<std::vector<llama_token> *>(token_history),
+        }
+    );
+}
+
+// synth-id 
+
+bool llama_sampler_check_synthId_watermark(llama_token token, const int64_t * key_vector, size_t key_vector_size, const char * seed, const llama_token * token_history, size_t n_tokens, double previous_weighted_mean, uint32_t tokens_so_far) {
+
+    std::string hash_input = seed;
+
+    for (size_t i = 0; i < n_tokens; ++i) {
+        hash_input += std::to_string(token_history[i]);
+    }
+
+    std::vector<double> weights(key_vector_size);
+
+    if (key_vector_size == 1) {
+        weights[0] = 10.0;
+    } else {
+        double step = (10.0 - 1.0) / (key_vector_size - 1);
+
+        for (size_t i = 0; i < key_vector_size; ++i) {
+            weights[i] = 10.0 - i * step;
+        }
+    }
+
+    double sum_weights = 0.0;
+
+    for (double w : weights) {
+        sum_weights += w;
+    }
+
+    for (double & w : weights) {
+        w *= static_cast<double>(key_vector_size) / sum_weights;
+    }
+
+    std::vector<double> hashes(key_vector_size);
+    double hash_sum = 0.0;
+
+    for (size_t i = 0; i < key_vector_size; ++i) {
+        std::string input = hash_input;
+
+        input += std::to_string(token);
+        input += std::to_string(key_vector[i]);
+
+        double g = hash_string(input) % 2;
+        hash_sum += g * weights[i];
+    }
+
+    double weighted_mean = hash_sum / static_cast<double>(key_vector_size);
+
+    return weighted_mean+previous_weighted_mean/(static_cast<double>(tokens_so_far+1));
+
+}
+
+static void llama_sampler_synthId_impl(llama_token_data_array * cur_p, const std::vector<int64_t> & key_vector, const std::string & seed, const std::vector<llama_token> & token_history, std::mt19937 & rng) {
+    
+    size_t n_tokens = token_history.size();
+    std::string hash_input = seed;
+
+    // printf("Tokens used for hash: ");
+
+    for (size_t i = 0; i < n_tokens; ++i) {
+        // printf("%d ", token_history[i]);
+        hash_input += std::to_string(token_history[i]);
+    }
+
+    size_t n = cur_p->size;
+
+    std::vector<std::vector<uint64_t>> hashes(n);
+
+    for (size_t i = 0; i < n; ++i) {
+        for (size_t j = 0; j < key_vector.size(); ++j) {
+            std::string input = hash_input;
+
+            input += std::to_string(cur_p->data[i].id);
+            input += std::to_string(key_vector[j]);
+
+            hashes[i].push_back(hash_string(input) % 2);
+        }
+    }
+
+    float max_l = cur_p->data[0].logit;
+
+    if (!cur_p->sorted) {
+        for (size_t i = 1; i < cur_p->size; ++i) {
+            max_l = std::max(max_l, cur_p->data[i].logit);
+        }
+    }
+
+    double sum_cum = 0.0f;
+    for (size_t i = 0; i < cur_p->size; ++i) {
+        float p = expf(cur_p->data[i].logit - max_l);
+        cur_p->data[i].p = p;
+        sum_cum += p;
+    }
+
+    for (size_t i = 0; i < cur_p->size; ++i) {
+        cur_p->data[i].p /= sum_cum;
+    }
+
+    // size_t n = cur_p->size;
+    size_t k = key_vector.size();
+    std::vector<double> gmass(k, 0.0);
+    for (size_t i = 0; i < k; ++i) {
+        for (size_t j = 0; j < hashes.size(); ++j) {
+                gmass[i] += cur_p->data[j].p * hashes[j][i];
+        }
+
+        for (size_t t = 0; t < cur_p->size; ++t) {
+            cur_p->data[t].p *= 1 + hashes[t][i] - gmass[i];
+        }
+    }
+
+    cur_p->selected = llama_sample_dist(cur_p, rng);
+}
+
+struct llama_sampler_synthId : public llama_sampler_backend {
+    std::vector<int64_t> key_vector;
+    const std::string seed;
+    std::mt19937 rng;
+    uint32_t rng_seed;
+    std::vector<llama_token> * token_history;
+};
+
+static const char * llama_sampler_synthId_name(const struct llama_sampler * smpl) {
+    auto * sctx = (llama_sampler_synthId *) smpl->ctx;
+    return sctx->get_name();
+}
+
+static void llama_sampler_synthId_apply(struct llama_sampler * smpl, llama_token_data_array * cur_p) {
+    auto * ctx = (llama_sampler_synthId *) smpl->ctx;
+    // llama_sampler_synthId_impl(cur_p, ctx->key_vector);
+    llama_sampler_synthId_impl(cur_p, ctx->key_vector, ctx->seed, *ctx->token_history, ctx ->rng);
+}
+
+static struct llama_sampler * llama_sampler_synthId_clone(const struct llama_sampler * smpl) {
+    const auto * ctx = (const llama_sampler_synthId *) smpl->ctx;
+    return llama_sampler_init_synthId(ctx->key_vector.data(), ctx->key_vector.size(), ctx->seed.c_str(), ctx->rng_seed, ctx->token_history);
+}
+
+static void llama_sampler_synthId_free(struct llama_sampler * smpl) {
+    delete (llama_sampler_synthId *) smpl->ctx;
+}
+
+static struct llama_sampler_i llama_sampler_synthId_i = {
+    /* .name              = */ llama_sampler_synthId_name,
+    /* .accept            = */ nullptr,
+    /* .apply             = */ llama_sampler_synthId_apply,
+    /* .reset             = */ nullptr,
+    /* .clone             = */ llama_sampler_synthId_clone,
+    /* .free              = */ llama_sampler_synthId_free,
+    /* .backend_init      = */ nullptr,
+    /* .backend_accept    = */ nullptr,
+    /* .backend_apply     = */ nullptr,
+    /* .backend_set_input = */ nullptr,
+    /* .backend_reset     = */ nullptr,
+    /* .copy_state        = */ nullptr,
+};
+
+struct llama_sampler * llama_sampler_init_synthId(const int64_t * keys, size_t n_keys, const char * seed, uint32_t rng_seed, void * token_history ) {
+    std::vector<int64_t> key_vector(keys, keys + n_keys);
+    auto seed_cur = get_rng_seed(rng_seed);
+    return llama_sampler_init(
+        /* .iface = */ &llama_sampler_synthId_i,
+        /* .ctx   = */ new llama_sampler_synthId {
+            ("synth-id"),
+            key_vector,
+            std::string(seed),
+            std::mt19937(seed_cur),
+            rng_seed,
+            static_cast<std::vector<llama_token> *>(token_history),
+        }
+    );
+}
+
 // top-p
 
 struct llama_sampler_top_p : public llama_sampler_backend {

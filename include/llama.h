@@ -1467,6 +1467,20 @@ extern "C" {
 
     LLAMA_API struct llama_sampler * llama_sampler_init_greedy(void);
 
+    // LLAMA_API struct llama_sampler * llama_sampler_init_green_red(float logit_bias, float gamma, std::string seed);
+
+    LLAMA_API struct llama_sampler * llama_sampler_init_green_red(float logit_bias, float gamma, const char * seed, void * token_history);
+
+    LLAMA_API bool llama_sampler_check_basic_watermark(llama_token token);
+
+    LLAMA_API bool llama_sampler_check_basic_watermarkv2(llama_token token, float gamma, const char * seed, const llama_token * token_history, size_t n_tokens, int32_t n_vocab);
+
+    LLAMA_API void * llama_token_history_create();
+
+    LLAMA_API void llama_token_history_add(void * history, llama_token token);
+    
+    LLAMA_API void llama_token_history_remove_oldest(void * history);
+
     /// seed == LLAMA_DEFAULT_SEED to use a random seed.
     LLAMA_API struct llama_sampler * llama_sampler_init_dist(uint32_t seed);
 

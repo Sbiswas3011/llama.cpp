@@ -89,6 +89,7 @@ int main(int argc, char ** argv) {
     }
 
     const llama_vocab * vocab = llama_model_get_vocab(model);
+    const int n_vocab = llama_vocab_n_tokens(vocab);
 
     // initialize the context
     llama_context_params ctx_params = llama_context_default_params();
@@ -101,10 +102,15 @@ int main(int argc, char ** argv) {
         return 1;
     }
 
+    std::vector<llama_token> TokenHistory;
+
     // initialize the sampler
+    std::string seed = "i_am_a_llm";
     llama_sampler * smpl = llama_sampler_chain_init(llama_sampler_chain_default_params());
-    llama_sampler_chain_add(smpl, llama_sampler_init_min_p(0.05f, 1));
-    llama_sampler_chain_add(smpl, llama_sampler_init_temp(0.8f));
+    llama_sampler_chain_add(smpl, llama_sampler_init_green_red(1.0f, 0.6f, seed.c_str(), &TokenHistory));
+    llama_sampler_chain_add(smpl, llama_sampler_init_top_k(40));
+    // llama_sampler_chain_add(smpl, llama_sampler_init_min_p(0.05f, 1));
+    // llama_sampler_chain_add(smpl, llama_sampler_init_temp(0.8f));
     llama_sampler_chain_add(smpl, llama_sampler_init_dist(LLAMA_DEFAULT_SEED));
 
     llama_batch_ext * batch = llama_batch_ext_init(ctx);
@@ -112,6 +118,7 @@ int main(int argc, char ** argv) {
     // helper function to evaluate a prompt and generate a response
     auto generate = [&](const std::string & prompt) {
         std::string response;
+        int32_t N = 4;
 
         const bool is_first = llama_memory_seq_pos_max(llama_get_memory(ctx), 0) == -1;
 
@@ -122,11 +129,15 @@ int main(int argc, char ** argv) {
             GGML_ABORT("failed to tokenize the prompt\n");
         }
 
+        size_t start = prompt_tokens.size() > N ? prompt_tokens.size() - N: 0;
+        TokenHistory.assign(prompt_tokens.begin() + start,prompt_tokens.end());
+
         // the tokens to evaluate next: the prompt, then the sampled token
         const llama_token * tokens = prompt_tokens.data();
         int n_tokens = prompt_tokens.size();
 
         llama_token new_token_id;
+        bool is_green = false;
         while (true) {
             // check if we have enough space in the context to evaluate this batch
             int n_ctx = llama_n_ctx(ctx);
@@ -147,6 +158,15 @@ int main(int argc, char ** argv) {
 
             // sample the next token
             new_token_id = llama_sampler_sample(smpl, ctx, -1);
+
+            TokenHistory.push_back(new_token_id);
+
+            if (TokenHistory.size() > N) {
+                TokenHistory.erase(TokenHistory.begin());
+            }
+
+            is_green = llama_sampler_check_basic_watermarkv2(new_token_id, 0.6f, seed.c_str(), TokenHistory.data(), TokenHistory.size(), n_vocab);
+            // printf("Token Color %s", is_green ? "green" : "red");
 
             // is it an end of generation?
             if (llama_vocab_is_eog(vocab, new_token_id)) {
