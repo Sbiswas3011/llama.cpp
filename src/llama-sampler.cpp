@@ -1675,6 +1675,26 @@ void llama_token_history_add(void * history, llama_token token) {
     h->push_back(token);
 }
 
+size_t llama_token_history_size(void * history) {
+    auto * h = static_cast<std::vector<llama_token> *>(history);
+    return h->size();
+}
+
+size_t llama_token_history_get(void * history, llama_token * out, size_t cap) {
+    auto * h = static_cast<std::vector<llama_token> *>(history);
+
+    size_t n = h->size();
+    if (n > cap) {
+        n = cap;
+    }
+
+    for (size_t i = 0; i < n; i++) {
+        out[i] = (*h)[i];
+    }
+
+    return n;
+}
+
 void llama_token_history_remove_oldest(void * history) {
     auto * h = static_cast<std::vector<llama_token> *>(history);
 
@@ -1741,88 +1761,115 @@ struct llama_sampler * llama_sampler_init_green_red(float logit_bias, float gamm
 
 // synth-id 
 
-bool llama_sampler_check_synthId_watermark(llama_token token, const int64_t * key_vector, size_t key_vector_size, const char * seed, const llama_token * token_history, size_t n_tokens, double previous_weighted_mean, uint32_t tokens_so_far) {
+// seed string -> 64-bit IV 
+static uint64_t seed_to_iv(const std::string & seed) {
+    uint64_t h = 14695981039346656037ULL;            // FNV-1a over the seed bytes
+    for (unsigned char c : seed) {
+        h ^= c;
+        h *= 1099511628211ULL;
+    }
+    h ^= h >> 33; h *= 0xff51afd7ed558ccdULL;        // fmix64 so the IV is well mixed
+    h ^= h >> 33; h *= 0xc4ceb9fe1a85ec53ULL;
+    h ^= h >> 33;
+    return h;
+}
 
-    std::string hash_input = seed;
+// Google's accumulate_hash for one value (wraps mod 2^64)
+static inline uint64_t acc(uint64_t h, uint64_t d) {
+    return (h + d) * 6364136223846793005ULL + 1ULL;
+}
 
+// Google's get_gvals: 12 rounds of (acc with 1, shift right 5), then bit 30
+static inline int gval(uint64_t h) {
+    int64_t s = (int64_t) h;                         // signed so >> is arithmetic, like torch
+    for (int r = 0; r < 12; ++r) {
+        s = (int64_t) acc((uint64_t) s, 1) >> 5;
+    }
+    return (int) ((s >> 30) & 1);
+}
+
+double llama_sampler_check_synthId_watermark(llama_token token, const int64_t * key_vector, size_t key_vector_size, const char * seed, const llama_token * token_history, size_t n_tokens, double previous_weighted_mean, uint32_t tokens_so_far) {
+
+    // std::string hash_input = seed;
+    const uint64_t iv = seed_to_iv(seed);
+
+    uint64_t ctx = iv;
     for (size_t i = 0; i < n_tokens; ++i) {
-        hash_input += std::to_string(token_history[i]);
+        // hash_input += std::to_string(token_history[i]);
+        ctx = acc(ctx, (uint64_t) token_history[i]);
+    }
+
+    if (key_vector_size == 0) {
+        return previous_weighted_mean;
     }
 
     std::vector<double> weights(key_vector_size);
 
     if (key_vector_size == 1) {
-        weights[0] = 10.0;
+        weights[0] = 1.0;
     } else {
         double step = (10.0 - 1.0) / (key_vector_size - 1);
 
         for (size_t i = 0; i < key_vector_size; ++i) {
             weights[i] = 10.0 - i * step;
         }
+
+        double sum_weights = 0.0;
+
+        for (double w : weights) {
+            sum_weights += w;
+        }
+
+        for (double & w : weights) {
+            w *= static_cast<double>(key_vector_size) / sum_weights;
+        }
     }
 
-    double sum_weights = 0.0;
-
-    for (double w : weights) {
-        sum_weights += w;
-    }
-
-    for (double & w : weights) {
-        w *= static_cast<double>(key_vector_size) / sum_weights;
-    }
-
-    std::vector<double> hashes(key_vector_size);
+    // std::vector<double> hashes(key_vector_size);
     double hash_sum = 0.0;
 
+    const uint64_t tok = acc(ctx, uint64_t(token));
     for (size_t i = 0; i < key_vector_size; ++i) {
-        std::string input = hash_input;
+        // std::string input = hash_input;
 
-        input += std::to_string(token);
-        input += std::to_string(key_vector[i]);
+        // input += std::to_string(token);
+        // input += std::to_string(key_vector[i]);
 
-        double g = hash_string(input) % 2;
+        // const uint64_t hash = hash_string(input);
+        const uint64_t kh = acc(tok, uint64_t(key_vector[i]));
+        const double g = double(gval(kh));
+        // const double g = static_cast<double>(hash % 2); 
         hash_sum += g * weights[i];
     }
 
     double weighted_mean = hash_sum / static_cast<double>(key_vector_size);
 
-    return weighted_mean+previous_weighted_mean/(static_cast<double>(tokens_so_far+1));
+    return (previous_weighted_mean * static_cast<double>(tokens_so_far) + weighted_mean) / (static_cast<double>(tokens_so_far + 1));
 
 }
 
 static void llama_sampler_synthId_impl(llama_token_data_array * cur_p, const std::vector<int64_t> & key_vector, const std::string & seed, const std::vector<llama_token> & token_history, std::mt19937 & rng) {
     
-    size_t n_tokens = token_history.size();
-    std::string hash_input = seed;
+    const size_t n = cur_p->size;
+    const size_t k = key_vector.size();
 
-    // printf("Tokens used for hash: ");
-
-    for (size_t i = 0; i < n_tokens; ++i) {
-        // printf("%d ", token_history[i]);
-        hash_input += std::to_string(token_history[i]);
+    if (n == 0 || k == 0) {
+        return;
     }
 
-    size_t n = cur_p->size;
+    // std::string hash_input = seed;
+    const uint64_t iv = seed_to_iv(seed);
 
-    std::vector<std::vector<uint64_t>> hashes(n);
-
-    for (size_t i = 0; i < n; ++i) {
-        for (size_t j = 0; j < key_vector.size(); ++j) {
-            std::string input = hash_input;
-
-            input += std::to_string(cur_p->data[i].id);
-            input += std::to_string(key_vector[j]);
-
-            hashes[i].push_back(hash_string(input) % 2);
-        }
+    uint64_t ctx = iv;
+    for (llama_token token : token_history) {
+        // hash_input += std::to_string(token);
+        ctx = acc(ctx, (uint64_t) token);
     }
 
     float max_l = cur_p->data[0].logit;
 
-    if (!cur_p->sorted) {
-        for (size_t i = 1; i < cur_p->size; ++i) {
-            max_l = std::max(max_l, cur_p->data[i].logit);
-        }
+    for (size_t i = 1; i < cur_p->size; ++i) {
+        max_l = std::max(max_l, cur_p->data[i].logit);
     }
 
     double sum_cum = 0.0f;
@@ -1832,24 +1879,176 @@ static void llama_sampler_synthId_impl(llama_token_data_array * cur_p, const std
         sum_cum += p;
     }
 
-    for (size_t i = 0; i < cur_p->size; ++i) {
-        cur_p->data[i].p /= sum_cum;
+    const float inv_sum = 1.0f / sum_cum;
+
+    for (size_t i = 0; i < n; ++i) {
+        cur_p->data[i].p *= inv_sum;
     }
 
-    // size_t n = cur_p->size;
-    size_t k = key_vector.size();
+    // // ---------------- DEBUG ----------------
+    // printf("\n========== SynthID DEBUG ==========\n");
+    // printf("Candidates: %zu\n", n);
+    // printf("Keys: %zu\n", k);
+    // printf("Seed: %s\n", seed.c_str());
+    // printf("History size: %zu\n", token_history.size());
+
+    // double initial_sum = 0.0;
+    // for (size_t i = 0; i < n; ++i) {
+    //     initial_sum += cur_p->data[i].p;
+    // }
+
+    // printf("Initial probability sum: %.8f\n", initial_sum);
+    // // ---------------------------------------
+
+    std::vector<std::vector<uint64_t>> hashes(n);
+
+    for (size_t i = 0; i < n; ++i) {
+        const uint64_t tok = acc(ctx, uint64_t(cur_p->data[i].id));
+        for (size_t j = 0; j < k; ++j) {
+            // std::string input = hash_input;
+
+            // input += std::to_string(cur_p->data[i].id);
+            // input += std::to_string(key_vector[j]);
+
+            // const uint64_t hash = hash_string(input);
+
+            const uint64_t kh = acc(tok, uint64_t(key_vector[j]));
+            // hashes[i].push_back(hash % 2);
+
+            hashes[i].push_back(gval(kh));  
+        }
+    }
+
+    // // ---------------- DEBUG ----------------
+    // printf("\n--- G VALUES ---\n");
+
+    // size_t total_g_ones = 0;
+    // size_t total_g_values = n * k;
+
+    // for (size_t i = 0; i < n; ++i) {
+    //     printf(
+    //         "token=%d p=%.6f g=[",
+    //         cur_p->data[i].id,
+    //         cur_p->data[i].p
+    //     );
+
+    //     for (size_t j = 0; j < k; ++j) {
+    //         printf(
+    //             "%llu%s",
+    //             (unsigned long long) hashes[i][j],
+    //             j + 1 == k ? "" : ","
+    //         );
+
+    //         if (hashes[i][j] == 1) {
+    //             total_g_ones++;
+    //         }
+    //     }
+
+    //     printf("]\n");
+    // }
+
+    // printf(
+    //     "G distribution: %zu / %zu = %.2f%% ones\n",
+    //     total_g_ones,
+    //     total_g_values,
+    //     100.0 * total_g_ones / total_g_values
+    // );
+    // // ---------------------------------------
+
     std::vector<double> gmass(k, 0.0);
     for (size_t i = 0; i < k; ++i) {
         for (size_t j = 0; j < hashes.size(); ++j) {
                 gmass[i] += cur_p->data[j].p * hashes[j][i];
         }
 
+        // // ---------------- DEBUG ----------------
+        // printf(
+        //     "\n--- DEPTH %zu ---\n",
+        //     i
+        // );
+
+        // printf(
+        //     "key=%lld gmass=%.8f\n",
+        //     (long long) key_vector[i],
+        //     gmass[i]
+        // );
+        // // ---------------------------------------
+
+
         for (size_t t = 0; t < cur_p->size; ++t) {
+            // const double old_p = cur_p->data[t].p;
             cur_p->data[t].p *= 1 + hashes[t][i] - gmass[i];
+            // const double new_p = cur_p->data[t].p;
+
+            // printf(
+            //     "token=%d g=%llu old_p=%.8f multiplier=%.8f new_p=%.8f %s\n",
+            //     cur_p->data[t].id,
+            //     (unsigned long long) hashes[t][i],
+            //     old_p,
+            //     1.0 + hashes[t][i] - gmass[i],
+            //     new_p,
+            //     new_p > old_p ? "INCREASED" :
+            //     new_p < old_p ? "DECREASED" :
+            //     "UNCHANGED"
+            // );
+            // // ---------------------------------------
         }
+         // ---------------- DEBUG ----------------
+        // double probability_sum = 0.0;
+
+        // for (size_t t = 0; t < cur_p->size; ++t) {
+        //     probability_sum += cur_p->data[t].p;
+        // }
+
+        // printf(
+        //     "Probability sum after depth %zu: %.8f\n",
+        //     i,
+        //     probability_sum
+        // );
+        // // ---------------------------------------
     }
 
+    // ---------------- DEBUG ----------------
+    // printf("\n--- FINAL DISTRIBUTION ---\n");
+
+    // for (size_t i = 0; i < cur_p->size; ++i) {
+    //     printf(
+    //         "token=%d final_p=%.8f\n",
+    //         cur_p->data[i].id,
+    //         cur_p->data[i].p
+    //     );
+    // }
+
+    // double final_sum = 0.0;
+
+    // for (size_t i = 0; i < cur_p->size; ++i) {
+    //     final_sum += cur_p->data[i].p;
+    // }
+
+    // printf("Final probability sum: %.8f\n", final_sum);
+    // // ---------------------------------------
+
     cur_p->selected = llama_sample_dist(cur_p, rng);
+
+    // // ---------------- DEBUG ----------------
+    // printf(
+    //     "SELECTED TOKEN: %d\n",
+    //     cur_p->data[cur_p->selected].id
+    // );
+
+    // printf("Selected G values: [");
+
+    // for (size_t i = 0; i < k; ++i) {
+    //     printf(
+    //         "%llu%s",
+    //         (unsigned long long) hashes[cur_p->selected][i],
+    //         i + 1 == k ? "" : ","
+    //     );
+    // }
+
+    // printf("]\n");
+    // printf("===================================\n\n");
+    // // ---------------------------------------
 }
 
 struct llama_sampler_synthId : public llama_sampler_backend {

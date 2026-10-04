@@ -104,15 +104,17 @@ int main(int argc, char ** argv) {
     }
 
     std::vector<llama_token> TokenHistory;
+    std::vector<int64_t> Keys = {1, 2, 3, 4, 5};
 
     // initialize the sampler
     std::string seed = "i_am_a_llm";
     llama_sampler * smpl = llama_sampler_chain_init(llama_sampler_chain_default_params());
-    llama_sampler_chain_add(smpl, llama_sampler_init_green_red(1.0f, 0.6f, seed.c_str(), &TokenHistory));
-    llama_sampler_chain_add(smpl, llama_sampler_init_top_k(40));
+    // llama_sampler_chain_add(smpl, llama_sampler_init_green_red(1.0f, 0.6f, seed.c_str(), &TokenHistory));
+    llama_sampler_chain_add(smpl, llama_sampler_init_top_k(10));
+    llama_sampler_chain_add(smpl, llama_sampler_init_synthId(Keys.data(), Keys.size(), seed.c_str(), LLAMA_DEFAULT_SEED, &TokenHistory));
     // llama_sampler_chain_add(smpl, llama_sampler_init_min_p(0.05f, 1));
     // llama_sampler_chain_add(smpl, llama_sampler_init_temp(0.8f));
-    llama_sampler_chain_add(smpl, llama_sampler_init_dist(LLAMA_DEFAULT_SEED));
+    // llama_sampler_chain_add(smpl, llama_sampler_init_dist(LLAMA_DEFAULT_SEED));
 
     llama_batch_ext * batch = llama_batch_ext_init(ctx);
 
@@ -142,7 +144,11 @@ int main(int argc, char ** argv) {
 
         llama_token new_token_id;
         bool is_green = false;
+        double weighted_mean = 0.0;
+        int count = 0;
+        // uint32_t generated_tokens = 0;
         while (true) {
+            count++;
             // check if we have enough space in the context to evaluate this batch
             int n_ctx = llama_n_ctx(ctx);
             int n_ctx_used = llama_memory_seq_pos_max(llama_get_memory(ctx), 0) + 1;
@@ -152,26 +158,60 @@ int main(int argc, char ** argv) {
                 exit(0);
             }
 
+            auto t0 = std::chrono::high_resolution_clock::now();
             // positions continue from the memory
             batch_set_tokens(batch, tokens, n_tokens, n_ctx_used);
+
+            auto t1 = std::chrono::high_resolution_clock::now();
 
             int ret = llama_process(ctx, LLAMA_PROCESS_TYPE_DECODE, batch);
             if (ret != 0) {
                 GGML_ABORT("failed to decode, ret = %d\n", ret);
             }
 
+            auto t2 = std::chrono::high_resolution_clock::now();    
+
             // sample the next token
             new_token_id = llama_sampler_sample(smpl, ctx, -1);
+            // generated_tokens++;
+
+            auto t3 = std::chrono::high_resolution_clock::now();
+
+            weighted_mean = llama_sampler_check_synthId_watermark(new_token_id, Keys.data(), Keys.size(), seed.c_str(), TokenHistory.data(), TokenHistory.size(), weighted_mean, generated_tokens);
             generated_tokens++;
 
-            TokenHistory.push_back(new_token_id);
+            // TokenHistory.push_back(new_token_id);
+
+            // if (TokenHistory.size() > N) {
+            //     TokenHistory.erase(TokenHistory.begin());
+            // }
+
+            auto t4 = std::chrono::high_resolution_clock::now();
+
+            // is_green = llama_sampler_check_basic_watermarkv2(new_token_id, 0.6f, seed.c_str(), TokenHistory.data(), TokenHistory.size(), n_vocab);
+            // weighted_mean = llama_sampler_check_synthId_watermark(new_token_id, Keys.data(), Keys.size(), seed.c_str(), TokenHistory.data(), TokenHistory.size(), weighted_mean, generated_tokens);
+            // printf("\nToken %d Weighted Mean: %.4f\n", new_token_id, weighted_mean);
+            // printf("Token Color %s", is_green ? "green" : "red");
+
+             TokenHistory.push_back(new_token_id);
 
             if (TokenHistory.size() > N) {
                 TokenHistory.erase(TokenHistory.begin());
             }
 
-            is_green = llama_sampler_check_basic_watermarkv2(new_token_id, 0.6f, seed.c_str(), TokenHistory.data(), TokenHistory.size(), n_vocab);
-            // printf("Token Color %s", is_green ? "green" : "red");
+            auto t5 = std::chrono::high_resolution_clock::now();
+
+            printf(
+                "\nToken %d | decode: %.3f ms | sample: %.3f ms | watermark: %.3f ms | history: %.3f ms | total: %.3f ms\n",
+                new_token_id,
+                std::chrono::duration<double, std::milli>(t2 - t1).count(),
+                std::chrono::duration<double, std::milli>(t3 - t2).count(),
+                std::chrono::duration<double, std::milli>(t4 - t3).count(),
+                std::chrono::duration<double, std::milli>(t5 - t4).count(),
+                std::chrono::duration<double, std::milli>(t5 - t0).count()
+            );
+
+            printf("\nToken %d Weighted Mean: %.4f\n", new_token_id, weighted_mean);
 
             // is it an end of generation?
             if (llama_vocab_is_eog(vocab, new_token_id)) {
@@ -192,6 +232,10 @@ int main(int argc, char ** argv) {
             // prepare the next batch with the sampled token
             tokens   = &new_token_id;
             n_tokens = 1;
+
+            if (count > 30){
+                break;
+            }
         }
 
         auto end = std::chrono::steady_clock::now();
