@@ -61,7 +61,7 @@ extern "C" {
     struct llama_vocab;
     struct llama_model;
     struct llama_context;
-    struct llama_sampler;
+    struct llama_sampler;   
 
     typedef struct llama_memory_i * llama_memory_t;
 
@@ -1467,7 +1467,24 @@ extern "C" {
 
     LLAMA_API struct llama_sampler * llama_sampler_init_greedy(void);
 
-    // LLAMA_API struct llama_sampler * llama_sampler_init_green_red(float logit_bias, float gamma, std::string seed);
+    // struct common_speculative;
+    // struct common_batch;
+
+    LLAMA_API struct common_speculative * init_mtp_speculative(struct llama_context * ctx_tgt, struct llama_context * ctx_dft);
+
+    typedef struct spec_prompt_state spec_prompt_state;
+
+    LLAMA_API spec_prompt_state * llama_spec_prompt_init(
+        void * spec,
+        struct llama_context * ctx_tgt,
+        const llama_token * tokens,
+        int32_t n_tokens,
+        llama_seq_id seq_id
+    );
+
+    LLAMA_API llama_token llama_spec_prompt_last_token(spec_prompt_state * state);
+    LLAMA_API int32_t llama_spec_prompt_n_past(spec_prompt_state * state);
+    LLAMA_API void llama_spec_prompt_free(spec_prompt_state * state);
 
     LLAMA_API struct llama_sampler * llama_sampler_init_green_red(float logit_bias, float gamma, const char * seed, void * token_history);
 

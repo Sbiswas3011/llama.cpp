@@ -452,8 +452,12 @@ int llama_completion(int argc, char ** argv) {
     LOG_INF("sampler seed: %u\n",     common_sampler_get_seed(smpl));
     LOG_INF("sampler params: \n%s\n", sparams.print().c_str());
     LOG_INF("sampler chain: %s\n",    common_sampler_print(smpl).c_str());
-
     LOG_INF("generate: n_ctx = %d, n_batch = %d, n_predict = %d, n_keep = %d\n", n_ctx, params.n_batch, params.n_predict, params.n_keep);
+
+    printf("sampler seed: %u\n",     common_sampler_get_seed(smpl));
+    printf("sampler params: \n%s\n", sparams.print().c_str());
+    printf("sampler chain: %s\n",    common_sampler_print(smpl).c_str());
+    printf("generate: n_ctx = %d, n_batch = %d, n_predict = %d, n_keep = %d\n", n_ctx, params.n_batch, params.n_predict, params.n_keep);
 
     // group-attention state
     // number of grouped KV tokens so far (used only if params.grp_attn_n > 1)

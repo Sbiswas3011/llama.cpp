@@ -333,7 +333,10 @@ static void common_params_fit_impl(
             const llama_device_memory_data & dmd = dmds_full[id];
 
             const int64_t projected_used = dmd.mb.total();
+            printf("projectedUsed: ", projected_used);
             const int64_t projected_free = dmd.free - projected_used;
+            printf("dmd.free: ", dmd.free);
+            printf("projectedFree: ", projected_used);
             projected_free_per_device.push_back(projected_free);
 
             sum_free            += dmd.free;
@@ -347,6 +350,8 @@ static void common_params_fit_impl(
             }
         }
         assert(sum_free >= 0 && sum_projected_used >= 0);
+        printf("%s: projected to use %" PRId64 " MiB of device memory vs. %" PRId64 " MiB of free device memory\n",
+            __func__, sum_projected_used/MiB, sum_free/MiB);
         LOG_TRC("%s: projected to use %" PRId64 " MiB of device memory vs. %" PRId64 " MiB of free device memory\n",
             __func__, sum_projected_used/MiB, sum_free/MiB);
         if (nd == 1) {
@@ -383,6 +388,8 @@ static void common_params_fit_impl(
         }
         if (global_surplus < 0) {
             if (nd <= 1) {
+                printf("%s: cannot meet free memory target of %" PRId64 " MiB, need to reduce device memory by %" PRId64 " MiB\n",
+                    __func__, margins[0]/MiB, -global_surplus/MiB);
                 LOG_TRC("%s: cannot meet free memory target of %" PRId64 " MiB, need to reduce device memory by %" PRId64 " MiB\n",
                     __func__, margins[0]/MiB, -global_surplus/MiB);
             } else {
@@ -440,6 +447,8 @@ static void common_params_fit_impl(
                         LOG_TRC("%s: entire model should be fit across devices by reducing context\n", __func__);
                     } else {
                         const int64_t memory_reduction = sum_projected_used - sum_projected_used_min_ctx;
+                        printf("%s: context size reduced from %" PRIu32 " to %" PRIu32 " -> need %" PRId64 " MiB less memory in total\n",
+                            __func__, n_ctx_max, cparams->n_ctx, memory_reduction/MiB);
                         LOG_TRC("%s: context size reduced from %" PRIu32 " to %" PRIu32 " -> need %" PRId64 " MiB less memory in total\n",
                             __func__, n_ctx_max, cparams->n_ctx, memory_reduction/MiB);
                     }
@@ -648,6 +657,7 @@ static void common_params_fit_impl(
     targets.reserve(nd);
     for (size_t id = 0; id < nd; id++) {
         targets.push_back(dmds_full[id].free - margins[id]);
+        printf("%s: id=%zu, target=%" PRId64 " MiB\n", __func__, id, targets[id]/MiB);
         LOG_TRC("%s: id=%zu, target=%" PRId64 " MiB\n", __func__, id, targets[id]/MiB);
     }
 
@@ -670,6 +680,7 @@ static void common_params_fit_impl(
     if (hp_nex == 0) {
         LOG_TRC("%s: filling dense layers back-to-front:\n", __func__);
     } else {
+        printf("%s: filling dense-only layers back-to-front:\n", __func__);
         LOG_TRC("%s: filling dense-only layers back-to-front:\n", __func__);
     }
     for (int id = nd - 1; id >= 0; id--) {
@@ -689,6 +700,7 @@ static void common_params_fit_impl(
             if (mem_high[id] > targets[id]) {
                 assert(ngl_per_device_high[id].n_layer > ngl_per_device[id].n_layer);
                 uint32_t delta = ngl_per_device_high[id].n_layer - ngl_per_device[id].n_layer;
+                printf("%s: start filling device %" PRIu32 ", delta=%" PRIu32 "\n", __func__, id, delta);
                 LOG_TRC("%s: start filling device %" PRIu32 ", delta=%" PRIu32 "\n", __func__, id, delta);
                 while (delta > 1) {
                     uint32_t step_size = int64_t(delta) * (targets[id] - mem[id]) / (mem_high[id] - mem[id]);
@@ -723,6 +735,9 @@ static void common_params_fit_impl(
         }
 
         const int64_t projected_margin = dmds_full[id].free - mem[id];
+        printf(
+            "%s:   - %s: %2" PRIu32 " layers, %6" PRId64 " MiB used, %6" PRId64 " MiB free\n",
+            __func__, dev_names[id].c_str(), ngl_per_device[id].n_layer, mem[id]/MiB, projected_margin/MiB);
         LOG_TRC(
             "%s:   - %s: %2" PRIu32 " layers, %6" PRId64 " MiB used, %6" PRId64 " MiB free\n",
             __func__, dev_names[id].c_str(), ngl_per_device[id].n_layer, mem[id]/MiB, projected_margin/MiB);
@@ -747,6 +762,7 @@ static void common_params_fit_impl(
     }
     assert(id_dense_start < nd);
 
+    printf("%s: converting dense-only layers to full layers and filling them front-to-back with overflow to next device/system memory:\n", __func__);
     LOG_TRC("%s: converting dense-only layers to full layers and filling them front-to-back with overflow to next device/system memory:\n", __func__);
     for (size_t id = 0; id <= id_dense_start && id_dense_start < nd; id++) {
         std::vector<ngl_t> ngl_per_device_high = ngl_per_device;

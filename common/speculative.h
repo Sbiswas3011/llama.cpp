@@ -48,6 +48,8 @@ common_speculative_output_limits common_speculative_get_output_limits(
 
 common_speculative * common_speculative_init(common_params_speculative & params, uint32_t n_seq);
 
+// common_speculative * init_mtp_speculative(llama_context * ctx_tgt,llama_context * ctx_dft);
+
 void common_speculative_free(common_speculative * spec);
 
 struct common_speculative_draft_params {

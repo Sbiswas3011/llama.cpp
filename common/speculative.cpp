@@ -2675,6 +2675,110 @@ common_speculative_output_limits common_speculative_get_output_limits(
     };
 }
 
+common_speculative * init_mtp_speculative(llama_context * ctx_tgt,llama_context * ctx_dft){
+
+    if (ctx_tgt == nullptr || ctx_dft == nullptr) {
+        return nullptr;
+    }
+    common_params_speculative params{};
+
+    // Enable MTP only.
+    params.types = { COMMON_SPECULATIVE_TYPE_DRAFT_MTP };
+
+    // Supply your already-initialized contexts.
+    params.draft.ctx_tgt = ctx_tgt;
+    params.draft.ctx_dft = ctx_dft;
+
+    // Your configuration.
+    params.draft.n_max = 2;
+    params.draft.n_min = 0;
+    params.draft.p_min = 0.0f;
+    params.draft.backend_sampling = true;
+    params.draft.n_gpu_layers = -1;
+
+    params.draft.cache_type_k = GGML_TYPE_F16;
+    params.draft.cache_type_v = GGML_TYPE_F16;
+
+    // No device overrides.
+    params.draft.devices.clear();
+
+    return common_speculative_init(params, 1);
+}
+
+struct spec_prompt_state {
+    llama_context * ctx_tgt;
+    common_speculative * spec;
+
+    llama_token id_last;
+    int32_t n_past;
+
+    llama_tokens prompt_tgt;
+    common_batch batch_tgt;
+    llama_tokens draft;
+
+    spec_prompt_state(llama_context * ctx, common_speculative * s)
+        : ctx_tgt(ctx),
+          spec(s),
+          id_last(-1),
+          n_past(0),
+          batch_tgt(ctx) {}
+};
+
+spec_prompt_state * spec_prompt_init(
+    void * spec_ptr,
+    llama_context * ctx_tgt,
+    const llama_token * tokens,
+    int32_t n_tokens,
+    llama_seq_id seq_id
+) {
+    auto * spec = static_cast<common_speculative *>(spec_ptr);
+
+    if (!spec || !ctx_tgt || !tokens || n_tokens < 1) {
+        return nullptr;
+    }
+
+    auto state = std::make_unique<spec_prompt_state>(ctx_tgt, spec);
+
+    // Evaluate the prompt, excluding the last token.
+    common_batch batch_prompt(ctx_tgt);
+
+    for (int32_t i = 0; i < n_tokens - 1; ++i) {
+        batch_prompt.add(tokens[i], i, seq_id, false);
+    }
+
+    if (n_tokens > 1) {
+        llama_process(ctx_tgt, LLAMA_PROCESS_TYPE_DECODE, batch_prompt.get());
+
+        if (!common_speculative_process(spec, batch_prompt)) {
+            return nullptr;
+        }
+    }
+
+    // Keep the last token separate.
+    state->id_last = tokens[n_tokens - 1];
+
+    state->prompt_tgt.assign(tokens, tokens + n_tokens - 1);
+    state->prompt_tgt.reserve(llama_n_ctx(ctx_tgt));
+
+    state->n_past = n_tokens - 1;
+
+    common_speculative_begin(spec, seq_id, state->prompt_tgt);
+
+    return state.release();
+}
+
+llama_token spec_prompt_last_token(spec_prompt_state * state) {
+    return state ? state->id_last : -1;
+}
+
+int32_t spec_prompt_n_past(spec_prompt_state * state) {
+    return state ? state->n_past : 0;
+}
+
+void spec_prompt_free(spec_prompt_state * state) {
+    delete state;
+}
+
 // initialization of the speculative decoding system
 //
 common_speculative * common_speculative_init(common_params_speculative & params, uint32_t n_seq) {
@@ -2794,8 +2898,11 @@ common_speculative * common_speculative_init(common_params_speculative & params,
         /* .synth_probs = */ {},
     });
 
+    //3
     const int32_t n_max_configured = common_speculative_n_max(&params);
+    //3
     const int32_t n_max_effective  = common_speculative_n_max(result.get());
+    // nothing in rates
     const auto rates = common_speculative_synth_rates_resolve(&params, n_max_effective);
 
     std::vector<std::string> rates_str;
@@ -2849,6 +2956,15 @@ void common_speculative_begin(common_speculative * spec, llama_seq_id seq_id, co
         impl->begin(seq_id, prompt);
         impl->n_call_begin++;
     }
+}
+
+bool common_speculative_process_c(common_speculative * spec,const llama_batch * batch) {
+
+    if (spec == nullptr || batch == nullptr) {
+        return false;
+    }
+
+    // return common_speculative_process(spec, *batch);
 }
 
 bool common_speculative_process(common_speculative * spec, const common_batch & batch) {

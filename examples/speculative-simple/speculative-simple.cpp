@@ -30,6 +30,7 @@ int main(int argc, char ** argv) {
         return 1;
     }
 
+    //this gives 0 on &params.speculative nmax call; perseq = 1; total is per seq * total 
     const auto output_limits = common_speculative_get_output_limits(
             params.n_batch, params.n_parallel, common_speculative_n_max(&params.speculative));
     params.n_outputs_max = output_limits.total;
