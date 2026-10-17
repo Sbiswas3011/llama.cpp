@@ -177,27 +177,20 @@ int main(int argc, char ** argv) {
 
             auto t3 = std::chrono::high_resolution_clock::now();
 
-            weighted_mean = llama_sampler_check_synthId_watermark(new_token_id, Keys.data(), Keys.size(), seed.c_str(), TokenHistory.data(), TokenHistory.size(), weighted_mean, generated_tokens);
+            // weighted_mean = llama_sampler_check_synthId_watermark(new_token_id, Keys.data(), Keys.size(), seed.c_str(), TokenHistory.data(), TokenHistory.size(), weighted_mean, generated_tokens);
             generated_tokens++;
+
+            auto t4 = std::chrono::high_resolution_clock::now();
+
+            // is_green = llama_sampler_check_basic_watermarkv2(new_token_id, 0.6f, seed.c_str(), TokenHistory.data(), TokenHistory.size(), n_vocab);
+            // printf("\nToken %d Weighted Mean: %.4f\n", new_token_id, weighted_mean);
+            // printf("Token Color %s", is_green ? "green" : "red");
 
             // TokenHistory.push_back(new_token_id);
 
             // if (TokenHistory.size() > N) {
             //     TokenHistory.erase(TokenHistory.begin());
             // }
-
-            auto t4 = std::chrono::high_resolution_clock::now();
-
-            // is_green = llama_sampler_check_basic_watermarkv2(new_token_id, 0.6f, seed.c_str(), TokenHistory.data(), TokenHistory.size(), n_vocab);
-            // weighted_mean = llama_sampler_check_synthId_watermark(new_token_id, Keys.data(), Keys.size(), seed.c_str(), TokenHistory.data(), TokenHistory.size(), weighted_mean, generated_tokens);
-            // printf("\nToken %d Weighted Mean: %.4f\n", new_token_id, weighted_mean);
-            // printf("Token Color %s", is_green ? "green" : "red");
-
-             TokenHistory.push_back(new_token_id);
-
-            if (TokenHistory.size() > N) {
-                TokenHistory.erase(TokenHistory.begin());
-            }
 
             auto t5 = std::chrono::high_resolution_clock::now();
 

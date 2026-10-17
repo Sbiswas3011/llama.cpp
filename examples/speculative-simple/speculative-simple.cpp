@@ -186,6 +186,7 @@ int main(int argc, char ** argv) {
             n_draft_max = std::max(n_draft_max, 0);
 
             // generate a new draft
+            // equivalent to eiting draft params for spec
             common_speculative_get_draft_params(spec, seq_id) = {
                 /* .drafting   = */ true,
                 /* .n_max      = */ n_draft_max,

@@ -835,6 +835,32 @@ std::vector<llama_token> common_sampler_sample_and_accept_n_rejection(struct com
     return result;
 }
 
+static std::vector<llama_token> spec_sample_and_accept_n(llama_sampler * smpl, llama_context * ctx, const llama_tokens & draft) {
+    std::vector<llama_token> result;
+    result.reserve(draft.size() + 1);
+
+    const llama_vocab * vocab = llama_model_get_vocab(llama_get_model(ctx));
+
+    size_t i = 0;
+    for (; i < draft.size(); i++) {
+        // row i of the batch = target prediction after position i; also accepts into the chain
+        const llama_token id = llama_sampler_sample(smpl, ctx, (int32_t) i);
+        result.push_back(id);
+
+        // stop on mismatch, or on an EOG that isn't the last draft position
+        if (draft[i] != id || (llama_vocab_is_eog(vocab, id) && i + 1 < draft.size())) {
+            break;
+        }
+    }
+
+    // bonus token only if every draft token matched
+    if (i == draft.size()) {
+        result.push_back(llama_sampler_sample(smpl, ctx, (int32_t) i));
+    }
+
+    return result;
+}
+
 std::vector<llama_token> common_sampler_sample_and_accept_n(struct common_sampler * gsmpl, struct llama_context * ctx, const llama_tokens & draft, bool grammar_first) {
     std::vector<int> idxs(draft.size() + 1);
     for (size_t i = 0; i < idxs.size(); ++i) {

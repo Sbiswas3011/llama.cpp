@@ -2706,47 +2706,40 @@ common_speculative * init_mtp_speculative(llama_context * ctx_tgt,llama_context 
 }
 
 struct spec_prompt_state {
-    llama_context * ctx_tgt;
+    llama_context      * ctx_tgt;
     common_speculative * spec;
+    // common_sampler_ptr   smpl;
+    llama_sampler      * smpl;
+    const llama_vocab  * vocab;
+    llama_seq_id         seq_id;
 
-    llama_token id_last;
-    int32_t n_past;
+    llama_token   id_last = -1;
+    int32_t       n_past  = 0;
+    llama_tokens  prompt_tgt;
+    common_batch  batch_tgt;
+    llama_tokens  draft;
 
-    llama_tokens prompt_tgt;
-    common_batch batch_tgt;
-    llama_tokens draft;
-
-    spec_prompt_state(llama_context * ctx, common_speculative * s)
-        : ctx_tgt(ctx),
-          spec(s),
-          id_last(-1),
-          n_past(0),
-          batch_tgt(ctx) {}
+    spec_prompt_state(llama_context * c, common_speculative * s, llama_sampler * sm, llama_seq_id sid)
+        : ctx_tgt(c), spec(s), smpl(sm), seq_id(sid), batch_tgt(c) {
+        vocab = llama_model_get_vocab(llama_get_model(c));
+    }
 };
 
-spec_prompt_state * spec_prompt_init(
-    void * spec_ptr,
-    llama_context * ctx_tgt,
-    const llama_token * tokens,
-    int32_t n_tokens,
-    llama_seq_id seq_id
-) {
-    auto * spec = static_cast<common_speculative *>(spec_ptr);
+spec_prompt_state * spec_prompt_init(void * spec_ptr, void * ctx, void * smpl, const int32_t * tokens, int32_t n_tokens, int32_t seq_id) {
 
-    if (!spec || !ctx_tgt || !tokens || n_tokens < 1) {
-        return nullptr;
-    }
+    auto * spec    = (common_speculative *) spec_ptr;
+    auto * ctx_tgt = (llama_context *) ctx;
+    if (!spec || !ctx_tgt || !smpl || !tokens || n_tokens < 1) return nullptr;
 
-    auto state = std::make_unique<spec_prompt_state>(ctx_tgt, spec);
-
-    // Evaluate the prompt, excluding the last token.
-    common_batch batch_prompt(ctx_tgt);
-
-    for (int32_t i = 0; i < n_tokens - 1; ++i) {
-        batch_prompt.add(tokens[i], i, seq_id, false);
-    }
+    auto st = std::make_unique<spec_prompt_state>(ctx_tgt, spec, (llama_sampler *) smpl, seq_id);
 
     if (n_tokens > 1) {
+        common_batch batch_prompt(ctx_tgt);
+
+        for (int32_t i = 0; i < n_tokens - 1; ++i) {
+            batch_prompt.add(tokens[i], i, seq_id, false);
+        }
+
         llama_process(ctx_tgt, LLAMA_PROCESS_TYPE_DECODE, batch_prompt.get());
 
         if (!common_speculative_process(spec, batch_prompt)) {
@@ -2754,30 +2747,172 @@ spec_prompt_state * spec_prompt_init(
         }
     }
 
-    // Keep the last token separate.
-    state->id_last = tokens[n_tokens - 1];
+    st->id_last = tokens[n_tokens - 1];
+    st->prompt_tgt.assign(tokens, tokens + n_tokens - 1);
+    st->prompt_tgt.reserve(llama_n_ctx(ctx_tgt));
+    st->n_past = n_tokens - 1;
 
-    state->prompt_tgt.assign(tokens, tokens + n_tokens - 1);
-    state->prompt_tgt.reserve(llama_n_ctx(ctx_tgt));
-
-    state->n_past = n_tokens - 1;
-
-    common_speculative_begin(spec, seq_id, state->prompt_tgt);
-
-    return state.release();
+    common_speculative_begin(spec, seq_id, st->prompt_tgt);
+    return st.release();
 }
 
-llama_token spec_prompt_last_token(spec_prompt_state * state) {
-    return state ? state->id_last : -1;
-}
+// One speculative-decoding step: draft -> verify on target -> accept -> commit -> trim KV.
+// Returns the number of tokens written to `out`, or -1 on failure.
+int32_t spec_prompt_step(spec_prompt_state * st, int32_t * out, int32_t cap, int32_t n_remaining, int32_t * eos, int32_t * n_drafted_out) {
+    *eos = 0;
 
-int32_t spec_prompt_n_past(spec_prompt_state * state) {
-    return state ? state->n_past : 0;
-}
+    auto * ctx_tgt = st->ctx_tgt;
+    auto * spec    = st->spec;
+    const auto seq = st->seq_id;
+    llama_context * ctx_dft = nullptr; // set this if you keep a handle to it (see note below)
 
-void spec_prompt_free(spec_prompt_state * state) {
-    delete state;
+    // 1. draft
+    // leave room in the context for id_last + bonus token, and respect the caller's budget
+    int n_draft_max = (int) llama_n_ctx(ctx_tgt) - st->n_past - 2;
+    if (n_remaining >= 0) {
+        n_draft_max = std::min(n_draft_max, n_remaining - 1);
+    }
+    n_draft_max = std::max(n_draft_max, 0);
+
+    st->draft.clear();
+    common_speculative_get_draft_params(spec, seq) = {
+        /* .drafting = */ true,
+        /* .n_max    = */ n_draft_max,
+        /* .pos0     = */ st->n_past,
+        /* .id_last  = */ st->id_last,
+        /* .prompt   = */ &st->prompt_tgt,
+        /* .result   = */ &st->draft,
+    };
+    common_speculative_draft(spec);
+
+    // 2. verify on the target: decode [id_last, draft...], logits for every row
+    st->batch_tgt.clear();
+    st->batch_tgt.add(st->id_last, st->n_past++, seq, true); // n_past now points at the first draft slot
+    for (size_t i_draft = 0; i_draft < st->draft.size(); ++i_draft) {
+        st->batch_tgt.add(st->draft[i_draft], st->n_past + i_draft, seq, true);
+    }
+    llama_process(ctx_tgt, LLAMA_PROCESS_TYPE_DECODE, st->batch_tgt.get());
+
+    if (!common_speculative_process(spec, st->batch_tgt)) {
+        return -1;
+    }
+
+    const size_t n_draft = st->draft.size();
+
+    // 3. accept
+    // accepted = matching draft tokens + one final token (bonus or correction)
+    // auto accepted = common_sampler_sample_and_accept_n(st->smpl.get(), ctx_tgt, st->draft);
+    auto accepted = spec_sample_and_accept_n(st->smpl, ctx_tgt, st->draft);
+    if (accepted.empty()) {
+        return -1;
+    }
+
+    const size_t n_accepted_drafts = accepted.size() - 1;
+
+    common_speculative_accept(spec, seq, n_accepted_drafts);
+
+    st->n_past += (int32_t) n_accepted_drafts;
+    if (n_drafted_out) {
+        *n_drafted_out = (int32_t) n_draft;
+    }
+
+    // 4. commit tokens: the previous id_last becomes history, each accepted token takes its place
+    int32_t n_out = 0;
+    for (const llama_token token : accepted) {
+        st->prompt_tgt.push_back(st->id_last);
+        st->id_last = token;
+
+        if (llama_vocab_is_eog(st->vocab, token)) {
+            *eos = 1; // EOG is not emitted to the caller
+            break;
+        }
+        if (n_out < cap) {
+            out[n_out++] = token;
+        }
+    }
+
+    // 5. drop rejected draft tokens from KV (everything at or after n_past)
+    st->draft.clear();
+    llama_memory_seq_rm(llama_get_memory(ctx_tgt), seq, st->n_past, -1);
+    if (ctx_dft) {
+        llama_memory_seq_rm(llama_get_memory(ctx_dft), seq, st->n_past, -1);
+    }
+
+    return n_out;
 }
+// struct spec_prompt_state {
+//     llama_context * ctx_tgt;
+//     common_speculative * spec;
+
+//     llama_token id_last;
+//     int32_t n_past;
+
+//     llama_tokens prompt_tgt;
+//     common_batch batch_tgt;
+//     llama_tokens draft;
+
+//     spec_prompt_state(llama_context * ctx, common_speculative * s)
+//         : ctx_tgt(ctx),
+//           spec(s),
+//           id_last(-1),
+//           n_past(0),
+//           batch_tgt(ctx) {}
+// };
+
+// spec_prompt_state * spec_prompt_init(
+//     void * spec_ptr,
+//     llama_context * ctx_tgt,
+//     const llama_token * tokens,
+//     int32_t n_tokens,
+//     llama_seq_id seq_id
+// ) {
+//     auto * spec = static_cast<common_speculative *>(spec_ptr);
+
+//     if (!spec || !ctx_tgt || !tokens || n_tokens < 1) {
+//         return nullptr;
+//     }
+
+//     auto state = std::make_unique<spec_prompt_state>(ctx_tgt, spec);
+
+//     // Evaluate the prompt, excluding the last token.
+//     common_batch batch_prompt(ctx_tgt);
+
+//     for (int32_t i = 0; i < n_tokens - 1; ++i) {
+//         batch_prompt.add(tokens[i], i, seq_id, false);
+//     }
+
+//     if (n_tokens > 1) {
+//         llama_process(ctx_tgt, LLAMA_PROCESS_TYPE_DECODE, batch_prompt.get());
+
+//         if (!common_speculative_process(spec, batch_prompt)) {
+//             return nullptr;
+//         }
+//     }
+
+//     // Keep the last token separate.
+//     state->id_last = tokens[n_tokens - 1];
+
+//     state->prompt_tgt.assign(tokens, tokens + n_tokens - 1);
+//     state->prompt_tgt.reserve(llama_n_ctx(ctx_tgt));
+
+//     state->n_past = n_tokens - 1;
+
+//     common_speculative_begin(spec, seq_id, state->prompt_tgt);
+
+//     return state.release();
+// }
+
+// llama_token spec_prompt_last_token(spec_prompt_state * state) {
+//     return state ? state->id_last : -1;
+// }
+
+// int32_t spec_prompt_n_past(spec_prompt_state * state) {
+//     return state ? state->n_past : 0;
+// }
+
+// void spec_prompt_free(spec_prompt_state * state) {
+//     delete state;
+// }
 
 // initialization of the speculative decoding system
 //

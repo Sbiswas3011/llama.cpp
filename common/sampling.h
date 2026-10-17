@@ -83,6 +83,8 @@ llama_token common_sampler_sample(struct common_sampler * gsmpl, struct llama_co
 //
 // returns at least 1 token, up to idxs.size()
 //
+std::vector<llama_token> spec_sample_and_accept_n(llama_sampler * smpl, llama_context * ctx, const llama_tokens & draft);
+
 std::vector<llama_token> common_sampler_sample_and_accept_n(struct common_sampler * gsmpl, struct llama_context * ctx, const std::vector<int> & idxs, const llama_tokens & draft, bool grammar_first = false);
 
 // as above, but verifies by rejection sampling; draft_q holds the draft's candidates per token
