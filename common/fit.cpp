@@ -333,10 +333,10 @@ static void common_params_fit_impl(
             const llama_device_memory_data & dmd = dmds_full[id];
 
             const int64_t projected_used = dmd.mb.total();
-            printf("projectedUsed: ", projected_used);
+            // printf("projectedUsed: ", projected_used);
             const int64_t projected_free = dmd.free - projected_used;
-            printf("dmd.free: ", dmd.free);
-            printf("projectedFree: ", projected_used);
+            // printf("dmd.free: ", dmd.free);
+            // printf("projectedFree: ", projected_used);
             projected_free_per_device.push_back(projected_free);
 
             sum_free            += dmd.free;

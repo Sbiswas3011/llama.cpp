@@ -1885,21 +1885,6 @@ static void llama_sampler_synthId_impl(llama_token_data_array * cur_p, const std
         cur_p->data[i].p *= inv_sum;
     }
 
-    // // ---------------- DEBUG ----------------
-    // printf("\n========== SynthID DEBUG ==========\n");
-    // printf("Candidates: %zu\n", n);
-    // printf("Keys: %zu\n", k);
-    // printf("Seed: %s\n", seed.c_str());
-    // printf("History size: %zu\n", token_history.size());
-
-    // double initial_sum = 0.0;
-    // for (size_t i = 0; i < n; ++i) {
-    //     initial_sum += cur_p->data[i].p;
-    // }
-
-    // printf("Initial probability sum: %.8f\n", initial_sum);
-    // // ---------------------------------------
-
     std::vector<std::vector<uint64_t>> hashes(n);
 
     for (size_t i = 0; i < n; ++i) {
@@ -1919,136 +1904,21 @@ static void llama_sampler_synthId_impl(llama_token_data_array * cur_p, const std
         }
     }
 
-    // // ---------------- DEBUG ----------------
-    // printf("\n--- G VALUES ---\n");
-
-    // size_t total_g_ones = 0;
-    // size_t total_g_values = n * k;
-
-    // for (size_t i = 0; i < n; ++i) {
-    //     printf(
-    //         "token=%d p=%.6f g=[",
-    //         cur_p->data[i].id,
-    //         cur_p->data[i].p
-    //     );
-
-    //     for (size_t j = 0; j < k; ++j) {
-    //         printf(
-    //             "%llu%s",
-    //             (unsigned long long) hashes[i][j],
-    //             j + 1 == k ? "" : ","
-    //         );
-
-    //         if (hashes[i][j] == 1) {
-    //             total_g_ones++;
-    //         }
-    //     }
-
-    //     printf("]\n");
-    // }
-
-    // printf(
-    //     "G distribution: %zu / %zu = %.2f%% ones\n",
-    //     total_g_ones,
-    //     total_g_values,
-    //     100.0 * total_g_ones / total_g_values
-    // );
-    // // ---------------------------------------
-
     std::vector<double> gmass(k, 0.0);
     for (size_t i = 0; i < k; ++i) {
         for (size_t j = 0; j < hashes.size(); ++j) {
                 gmass[i] += cur_p->data[j].p * hashes[j][i];
         }
 
-        // // ---------------- DEBUG ----------------
-        // printf(
-        //     "\n--- DEPTH %zu ---\n",
-        //     i
-        // );
-
-        // printf(
-        //     "key=%lld gmass=%.8f\n",
-        //     (long long) key_vector[i],
-        //     gmass[i]
-        // );
-        // // ---------------------------------------
-
 
         for (size_t t = 0; t < cur_p->size; ++t) {
             // const double old_p = cur_p->data[t].p;
             cur_p->data[t].p *= 1 + hashes[t][i] - gmass[i];
             // const double new_p = cur_p->data[t].p;
-
-            // printf(
-            //     "token=%d g=%llu old_p=%.8f multiplier=%.8f new_p=%.8f %s\n",
-            //     cur_p->data[t].id,
-            //     (unsigned long long) hashes[t][i],
-            //     old_p,
-            //     1.0 + hashes[t][i] - gmass[i],
-            //     new_p,
-            //     new_p > old_p ? "INCREASED" :
-            //     new_p < old_p ? "DECREASED" :
-            //     "UNCHANGED"
-            // );
-            // // ---------------------------------------
         }
-         // ---------------- DEBUG ----------------
-        // double probability_sum = 0.0;
-
-        // for (size_t t = 0; t < cur_p->size; ++t) {
-        //     probability_sum += cur_p->data[t].p;
-        // }
-
-        // printf(
-        //     "Probability sum after depth %zu: %.8f\n",
-        //     i,
-        //     probability_sum
-        // );
-        // // ---------------------------------------
     }
 
-    // ---------------- DEBUG ----------------
-    // printf("\n--- FINAL DISTRIBUTION ---\n");
-
-    // for (size_t i = 0; i < cur_p->size; ++i) {
-    //     printf(
-    //         "token=%d final_p=%.8f\n",
-    //         cur_p->data[i].id,
-    //         cur_p->data[i].p
-    //     );
-    // }
-
-    // double final_sum = 0.0;
-
-    // for (size_t i = 0; i < cur_p->size; ++i) {
-    //     final_sum += cur_p->data[i].p;
-    // }
-
-    // printf("Final probability sum: %.8f\n", final_sum);
-    // // ---------------------------------------
-
     cur_p->selected = llama_sample_dist(cur_p, rng);
-
-    // // ---------------- DEBUG ----------------
-    // printf(
-    //     "SELECTED TOKEN: %d\n",
-    //     cur_p->data[cur_p->selected].id
-    // );
-
-    // printf("Selected G values: [");
-
-    // for (size_t i = 0; i < k; ++i) {
-    //     printf(
-    //         "%llu%s",
-    //         (unsigned long long) hashes[cur_p->selected][i],
-    //         i + 1 == k ? "" : ","
-    //     );
-    // }
-
-    // printf("]\n");
-    // printf("===================================\n\n");
-    // // ---------------------------------------
 }
 
 struct llama_sampler_synthId : public llama_sampler_backend {

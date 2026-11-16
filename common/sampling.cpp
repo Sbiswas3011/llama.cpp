@@ -835,7 +835,7 @@ std::vector<llama_token> common_sampler_sample_and_accept_n_rejection(struct com
     return result;
 }
 
-static std::vector<llama_token> spec_sample_and_accept_n(llama_sampler * smpl, llama_context * ctx, const llama_tokens & draft) {
+std::vector<llama_token> spec_sample_and_accept_n(llama_sampler * smpl, llama_context * ctx, const llama_tokens & draft) {
     std::vector<llama_token> result;
     result.reserve(draft.size() + 1);
 
